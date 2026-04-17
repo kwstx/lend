@@ -42,6 +42,10 @@ class Advance(BaseTenantModel, table=True):
     
     customer: Customer = Relationship(back_populates="advances")
     repayments: List["RepaymentObligation"] = Relationship(back_populates="advance")
+    
+    # Capital Source Link
+    capital_reservation_id: Optional[UUID] = Field(default=None, foreign_key="capital_reservations.id")
+    capital_reservation: Optional["CapitalReservation"] = Relationship(back_populates="advance")
 
 class RepaymentObligation(BaseTenantModel, table=True):
     __tablename__ = "repayment_obligations"
@@ -112,3 +116,29 @@ class EventLog(BaseTenantModel, table=True):
     created_at: datetime = Field(default_factory=datetime.utcnow)
     
     customer: Customer = Relationship(back_populates="events")
+
+class CapitalSource(SQLModel, table=True):
+    __tablename__ = "capital_sources"
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    name: str # Partner Lender, Treasury, Internal Balance Sheet
+    type: str # partner_api, treasury, internal_pool
+    available_amount: float = Field(default=0.0)
+    total_capacity: float = Field(default=0.0)
+    is_active: bool = Field(default=True)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    
+    # Relationships
+    reservations: List["CapitalReservation"] = Relationship(back_populates="source")
+
+class CapitalReservation(BaseTenantModel, table=True):
+    __tablename__ = "capital_reservations"
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    source_id: UUID = Field(foreign_key="capital_sources.id")
+    advance_id: Optional[UUID] = Field(default=None) # Set after advance is created
+    amount: float
+    status: str = Field(default="reserved") # reserved, committed, released
+    expires_at: datetime
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    
+    source: CapitalSource = Relationship(back_populates="reservations")
+    advance: Optional["Advance"] = Relationship(back_populates="capital_reservation")
