@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 from src.core.database import async_session, set_tenant_context
 from src.models.models import Customer, Transaction, Receivable
+from src.intelligence import CashFlowIntelligence
 
 async def reconcile_stripe_data():
     """
@@ -44,6 +45,8 @@ async def reconcile_stripe_data():
                             type="inflow",
                             category="sales",
                             timestamp=datetime.fromtimestamp(inv["status_transitions"]["paid_at"]),
+                            payer_id=inv.get("customer"),
+                            payer_name=inv.get("customer_name") or inv.get("customer_email"),
                             metadata={"source": "stripe_recon", "invoice_id": ext_id}
                         )
                         session.add(new_tx)
@@ -52,6 +55,10 @@ async def reconcile_stripe_data():
                 # balance = stripe.Balance.retrieve(stripe_account=customer.stripe_account_id)
                 # In a real app, you might log this or check against internal ledgers
                 # print(f"Stripe balance for {customer.id}: {balance}")
+                
+                # Update snapshot after reconciliation
+                intel = CashFlowIntelligence(session)
+                await intel.compute_and_save_snapshot(customer.id)
                 
                 await session.commit()
             except Exception as e:

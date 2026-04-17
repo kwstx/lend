@@ -11,6 +11,7 @@ import stripe
 from jose import jwt, jwk
 from src.core.database import get_session, set_tenant_context
 from src.models.models import Customer, Transaction, Receivable, EventLog
+from src.intelligence import CashFlowIntelligence
 
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 
@@ -124,9 +125,15 @@ async def stripe_webhook(
             type="inflow",
             category="sales",
             timestamp=datetime.fromtimestamp(invoice["status_transitions"]["paid_at"]),
+            payer_id=invoice.get("customer"), # Stripe Customer ID
+            payer_name=invoice.get("customer_name") or invoice.get("customer_email"),
             metadata={"source": "stripe", "invoice_id": ext_id}
         )
         session.add(transaction)
+        
+        # Trigger Snapshot Update
+        intel = CashFlowIntelligence(session)
+        await intel.compute_and_save_snapshot(customer.id)
 
     # Log event for idempotency
     event_log = EventLog(
@@ -185,9 +192,14 @@ async def plaid_webhook(
             amount=payload.get("new_transactions", 0) * 100.0, # Dummy logic
             type="inflow",
             category="subscription",
+            payer_id="plaid_unknown", # Plaid doesn't always expose this in webhooks
             metadata={"source": "plaid", "item_id": item_id}
         )
         session.add(transaction)
+        
+        # Trigger Snapshot Update
+        intel = CashFlowIntelligence(session)
+        await intel.compute_and_save_snapshot(customer.id)
 
     # Log event
     event_log = EventLog(

@@ -60,19 +60,41 @@ class Transaction(BaseTenantModel, table=True):
     id: UUID = Field(default_factory=uuid4, primary_key=True)
     amount: float
     type: str # inflow, outflow
-    category: str # sales, subscription, manual
+    category: str # sales, subscription, manual, transfer, refund
     timestamp: datetime = Field(default_factory=datetime.utcnow)
+    payer_id: Optional[str] = Field(default=None, index=True) # External payer ID (e.g. Stripe Customer ID)
+    payer_name: Optional[str] = Field(default=None, index=True)
     metadata: Dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
 
 class CashFlowSnapshot(BaseTenantModel, table=True):
-    """Aggregated state for credit limit calculations"""
+    """Aggregated state for credit limit calculations (versioned)"""
     __tablename__ = "cash_flow_snapshots"
     id: UUID = Field(default_factory=uuid4, primary_key=True)
-    calculated_at: datetime = Field(default_factory=datetime.utcnow)
-    total_open_receivables: float
-    active_advances_total: float
-    available_credit_limit: float
-    confidence_score: float
+    calculated_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+    
+    # Trailing Revenue
+    trailing_revenue_30d: float = Field(default=0.0)
+    trailing_revenue_90d: float = Field(default=0.0)
+    
+    # Revenue Stability (Coefficient of Variation: std_dev / mean)
+    # 0.0 is perfect stability, higher is more volatile
+    revenue_stability_score: float = Field(default=0.0)
+    
+    # Concentration Risk (Percentage of revenue from top payer in last 90d)
+    concentration_risk_score: float = Field(default=0.0)
+    
+    # Inflow Classification (Last 30d)
+    true_revenue_inflow_30d: float = Field(default=0.0)
+    other_inflow_30d: float = Field(default=0.0) # transfers, refunds, etc.
+    
+    # Core Liquidity
+    total_open_receivables: float = Field(default=0.0)
+    active_advances_total: float = Field(default=0.0)
+    available_credit_limit: float = Field(default=0.0)
+    
+    # Metadata for reconstruction
+    calculation_version: str = Field(default="v1")
+    confidence_score: float = Field(default=1.0)
 
 class EventLog(BaseTenantModel, table=True):
     """Immutable log of every state change"""
