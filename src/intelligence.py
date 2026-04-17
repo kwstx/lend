@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 from src.models.models import CashFlowSnapshot, Transaction, Receivable, Advance, Customer
 from src.risk_engine import RiskEngine
+from src.core.observability import AuditLogger
 
 class CashFlowIntelligence:
     def __init__(self, session: AsyncSession):
@@ -159,6 +160,20 @@ class CashFlowIntelligence:
         )
         
         self.session.add(snapshot)
+        
+        # Log Audit Event
+        await AuditLogger.log_action(
+            self.session,
+            customer_id=customer_id,
+            event_type="cash_flow_snapshot_computed",
+            payload={
+                "snapshot_id": str(snapshot.id),
+                "is_eligible": snapshot.is_eligible,
+                "credit_limit": snapshot.available_credit_limit,
+                "rejection_reasons": snapshot.rejection_reasons
+            }
+        )
+        
         await self.session.commit()
         await self.session.refresh(snapshot)
         

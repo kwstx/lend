@@ -8,6 +8,7 @@ from src.models.models import (
     EventLog, Transaction, Advance, RepaymentObligation, Customer, Receivable
 )
 from src.intelligence import CashFlowIntelligence
+from src.core.observability import AuditLogger
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +43,9 @@ class RepaymentProcessor:
                 event.processing_status = "processed"
                 processed_count += 1
             except Exception as e:
+                import sentry_sdk
                 logger.error(f"Failed to process event {event.id}: {str(e)}")
+                sentry_sdk.capture_exception(e)
                 event.processing_status = "failed"
                 event.error_message = str(e)
             
@@ -162,20 +165,19 @@ class RepaymentProcessor:
                     obligation.amount = 0
                 
                 # Audit trail: Log the repayment application
-                repayment_log = EventLog(
+                await AuditLogger.log_action(
+                    self.session,
                     customer_id=customer_id,
+                    advance_id=advance.id,
                     event_type="repayment_applied",
                     payload={
-                        "advance_id": str(advance.id),
                         "obligation_id": str(obligation.id),
                         "amount_applied": amount_to_apply,
                         "transaction_id": str(transaction.id),
                         "remaining_obligation_balance": obligation.amount
                     },
-                    idempotency_key=f"repay_{transaction.id}_{obligation.id}",
-                    processing_status="processed"
+                    idempotency_key=f"repay_{transaction.id}_{obligation.id}"
                 )
-                self.session.add(repayment_log)
             
             # Check if all obligations for this advance are met
             remaining_total = sum([o.amount for o in obligations])

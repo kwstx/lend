@@ -10,6 +10,7 @@ from src.models.models import (
 )
 from src.risk_engine import RiskEngine
 from src.core.capital import CapitalManager
+from src.core.observability import AuditLogger
 from datetime import datetime, timedelta
 
 class AdvanceService:
@@ -110,6 +111,16 @@ class AdvanceService:
         await self.session.commit()
         await self.session.refresh(advance)
         
+        # Log Audit Event
+        await AuditLogger.log_action(
+            self.session,
+            customer_id=customer_id,
+            advance_id=advance.id,
+            event_type="advance_created_direct",
+            payload={"amount": amount, "fee": advance.fee_amount, "capital_reservation_id": str(reservation.id)}
+        )
+        await self.session.commit()
+
         return advance
 
     async def cancel_advance_request(self, reservation_id: UUID):
@@ -186,6 +197,21 @@ class AdvanceService:
         )
         
         self.session.add(offer)
+        await self.session.flush() # Get offer ID
+        
+        # Log Audit Event
+        await AuditLogger.log_action(
+            self.session,
+            customer_id=customer_id,
+            event_type="financing_offer_generated",
+            payload={
+                "offer_id": str(offer.id),
+                "amount": amount,
+                "snapshot_id": str(snapshot.id),
+                "credit_limit": evaluation.credit_limit
+            }
+        )
+        
         await self.session.commit()
         await self.session.refresh(offer)
         return offer
@@ -241,6 +267,20 @@ class AdvanceService:
 
         self.session.add(reservation)
         self.session.add(queue_entry)
+
+        # Log Audit Event
+        await AuditLogger.log_action(
+            self.session,
+            customer_id=customer_id,
+            event_type="financing_offer_accepted",
+            payload={
+                "offer_id": str(offer.id),
+                "queue_id": str(queue_entry.id),
+                "reservation_id": str(reservation.id),
+                "amount": offer.amount
+            }
+        )
+
         await self.session.commit()
         await self.session.refresh(queue_entry)
         
@@ -295,6 +335,21 @@ class AdvanceService:
         reservation.status = "committed"
         reservation.advance_id = advance.id
 
+        # Log Audit Event (Source of Truth)
+        await AuditLogger.log_action(
+            self.session,
+            customer_id=queue_entry.customer_id,
+            advance_id=advance.id,
+            event_type="advance_funded",
+            payload={
+                "queue_id": str(queue_id),
+                "offer_id": str(offer.id),
+                "amount": offer.amount,
+                "reviewer_id": reviewer_id,
+                "notes": notes
+            }
+        )
+
         await self.session.commit()
         await self.session.refresh(advance)
         return advance
@@ -326,6 +381,19 @@ class AdvanceService:
         queue_entry.rejection_reason = reason
         
         offer.status = "rejected"
+
+        # Log Audit Event
+        await AuditLogger.log_action(
+            self.session,
+            customer_id=queue_entry.customer_id,
+            event_type="advance_funding_rejected",
+            payload={
+                "queue_id": str(queue_id),
+                "offer_id": str(offer.id),
+                "reason": reason,
+                "reviewer_id": reviewer_id
+            }
+        )
 
         await self.session.commit()
         await self.session.refresh(queue_entry)

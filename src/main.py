@@ -2,6 +2,7 @@ import uvicorn
 from fastapi import FastAPI, Depends, HTTPException, Header
 from sqlalchemy.ext.asyncio import AsyncSession
 from src.core.database import get_session, set_tenant_context
+from src.core.observability import setup_logging
 from src.reconciliation import run_reconciliation_job
 from src.services.advance_service import AdvanceService
 from src.services.repayment_processor import RepaymentProcessor
@@ -15,6 +16,9 @@ from fastapi.responses import HTMLResponse
 from datetime import datetime
 
 app = FastAPI(title="Lend - Embedded Financial Service")
+
+# Initialize structured logs
+setup_logging()
 
 async def get_current_customer_session(
     session: AsyncSession = Depends(get_session),

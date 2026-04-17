@@ -10,6 +10,8 @@ from src.models.models import (
     ReconciliationException, EventLog, BaseTenantModel
 )
 from src.core.database import set_tenant_context
+from src.core.observability import AuditLogger
+import sentry_sdk
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +91,7 @@ class ReconciliationService:
                 and_(
                     EventLog.customer_id == customer_id,
                     EventLog.event_type == "repayment_applied",
-                    EventLog.payload["advance_id"].astext == str(advance.id)
+                    EventLog.advance_id == advance.id
                 )
             )
             event_result = await self.session.execute(event_stmt)
@@ -183,5 +185,27 @@ class ReconciliationService:
             notes=notes
         )
         self.session.add(exc)
+        
+        # Log to Audit Trail
+        await AuditLogger.log_action(
+            self.session,
+            customer_id=customer_id,
+            event_type="reconciliation_exception_detected",
+            payload={
+                "exception_id": str(exc.id),
+                "type": exc_type,
+                "severity": severity,
+                "notes": notes
+            }
+        )
+        
+        # Capture critical issues in Sentry
+        if severity == "critical":
+            sentry_sdk.capture_message(
+                f"Reconciliation Mismatch: {exc_type}",
+                level="error",
+                extra={"customer_id": str(customer_id), "notes": notes, "internal": internal}
+            )
+
         logger.warning(f"Reconciliation Exception recorded: {exc_type} for customer {customer_id}")
 

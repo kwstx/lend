@@ -13,3 +13,5 @@ plaid-python
 apscheduler
 python-jose[cryptography]
 cryptography
+sentry-sdk[fastapi]
+python-json-logger

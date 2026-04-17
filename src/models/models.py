@@ -111,6 +111,7 @@ class EventLog(BaseTenantModel, table=True):
     """Immutable log of every state change"""
     __tablename__ = "events_log"
     id: UUID = Field(default_factory=uuid4, primary_key=True)
+    advance_id: Optional[UUID] = Field(default=None, index=True)
     event_type: str # receivable_created, advance_funded, repayment_processed, etc.
     payload: Dict[str, Any] = Field(sa_column=Column(JSON))
     idempotency_key: str = Field(unique=True, index=True)
