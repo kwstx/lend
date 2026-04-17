@@ -160,5 +160,12 @@ class FundingQueue(BaseTenantModel, table=True):
     offer_id: UUID = Field(foreign_key="financing_offers.id")
     reservation_id: UUID = Field(foreign_key="capital_reservations.id")
     status: str = Field(default="staged_for_approval") # staged_for_approval, approved, rejected, paid
+    
+    # HITL Approval tracking
+    reviewer_id: Optional[str] = Field(default=None)
+    reviewed_at: Optional[datetime] = Field(default=None)
+    rejection_reason: Optional[str] = Field(default=None)
+    reviewer_notes: Optional[str] = Field(default=None)
+
     created_at: datetime = Field(default_factory=datetime.utcnow)
 

@@ -2,13 +2,15 @@ import uvicorn
 from fastapi import FastAPI, Depends, HTTPException, Header
 from sqlalchemy.ext.asyncio import AsyncSession
 from src.core.database import get_session, set_tenant_context
-from src.models.models import Customer, EventLog
+from src.models.models import Customer, EventLog, FundingQueue, FinancingOffer
 from uuid import UUID
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from src.webhooks import router as webhooks_router
+from sqlalchemy import select, desc
 from src.reconciliation import reconcile_stripe_data
 from src.services.advance_service import AdvanceService
 from pydantic import BaseModel
+from fastapi.responses import HTMLResponse
 
 app = FastAPI(title="Lend - Embedded Financial Service")
 
@@ -84,6 +86,109 @@ async def accept_financing(
     service = AdvanceService(session)
     queue_entry = await service.accept_financing_offer(x_customer_id, acceptance.offer_id)
     return queue_entry
+
+# --- Admin Interface ---
+
+@app.get("/admin/funding-queue", response_class=HTMLResponse)
+async def admin_dashboard(session: AsyncSession = Depends(get_session)):
+    """
+    Simulated Admin Dashboard for operations to review funding requests.
+    In a real app, this would be protected by admin-only auth.
+    """
+    stmt = (
+        select(FundingQueue, Customer, FinancingOffer)
+        .join(Customer, FundingQueue.customer_id == Customer.id)
+        .join(FinancingOffer, FundingQueue.offer_id == FinancingOffer.id)
+        .filter(FundingQueue.status == "staged_for_approval")
+        .order_by(FundingQueue.created_at.desc())
+    )
+    result = await session.execute(stmt)
+    items = result.all()
+
+    rows = ""
+    for queue, customer, offer in items:
+        rows += f"""
+        <tr style="border-bottom: 1px solid #eee;">
+            <td style="padding: 12px;">{customer.name}</td>
+            <td style="padding: 12px;">${offer.amount:,.2f}</td>
+            <td style="padding: 12px;">{queue.created_at.strftime('%Y-%m-%d %H:%M')}</td>
+            <td style="padding: 12px;">
+                <button onclick="approve('{queue.id}')" style="background:#2ecc71; color:white; border:none; padding:6-12px; border-radius:4px; cursor:pointer;">Approve</button>
+                <button onclick="reject('{queue.id}')" style="background:#e74c3c; color:white; border:none; padding:6-12px; border-radius:4px; cursor:pointer; margin-left:8px;">Reject</button>
+            </td>
+        </tr>
+        """
+
+    html_content = f"""
+    <html>
+        <head>
+            <title>Lend | Operations Dashboard</title>
+            <style>
+                body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: #f8f9fa; color: #333; }}
+                .container {{ max-width: 1000px; margin: 40px auto; background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1); }}
+                h1 {{ color: #2c3e50; border-bottom: 2px solid #3498db; padding-bottom: 10px; }}
+                table {{ width: 100%; border-collapse: collapse; margin-top: 20px; }}
+                th {{ text-align: left; background: #f1f3f5; padding: 12px; font-weight: 600; }}
+            </style>
+            <script>
+                async function approve(id) {{
+                     const notes = prompt("Reviewer Notes (Optional)");
+                     const res = await fetch(`/admin/funding/${{id}}/approve?notes=${{encodeURIComponent(notes || '')}}`, {{ method: 'POST' }});
+                     if (res.ok) {{ alert('Capital deployed successfully!'); location.reload(); }}
+                     else alert('Error approving request');
+                }}
+                async function reject(id) {{
+                     const reason = prompt("Reason for rejection?");
+                     if (!reason) return;
+                     const res = await fetch(`/admin/funding/${{id}}/reject?reason=${{encodeURIComponent(reason)}}`, {{ method: 'POST' }});
+                     if (res.ok) {{ alert('Request rejected.'); location.reload(); }}
+                     else alert('Error rejecting request');
+                }}
+            </script>
+        </head>
+        <body>
+            <div class="container">
+                <h1>Funding Approval Queue (HITL)</h1>
+                <p>Reviewexposure and finalize capital deployment decisions.</p>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Customer</th>
+                            <th>Amount</th>
+                            <th>Requested At</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {rows or '<tr><td colspan="4" style="text-align:center; padding:20px; color:#999;">No pending approvals</td></tr>'}
+                    </tbody>
+                </table>
+            </div>
+        </body>
+    </html>
+    """
+    return HTMLResponse(content=html_content)
+
+@app.post("/admin/funding/{queue_id}/approve")
+async def approve_funding_request(
+    queue_id: UUID, 
+    notes: str = "",
+    session: AsyncSession = Depends(get_session)
+):
+    service = AdvanceService(session)
+    # Using 'admin_ops' as hardcoded reviewer for now
+    advance = await service.approve_funding(queue_id, reviewer_id="admin_ops", notes=notes)
+    return advance
+
+@app.post("/admin/funding/{queue_id}/reject")
+async def reject_funding_request(
+    queue_id: UUID, 
+    reason: str,
+    session: AsyncSession = Depends(get_session)
+):
+    service = AdvanceService(session)
+    result = await service.reject_funding(queue_id, reviewer_id="admin_ops", reason=reason)
+    return result
 
 if __name__ == "__main__":
     uvicorn.run("src.main:app", host="0.0.0.0", port=8000, reload=True)

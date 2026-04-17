@@ -231,7 +231,7 @@ class AdvanceService:
         )
         
         # Update offer status
-        offer.status = "funding_queued"
+        offer.status = "accepted" # Changed from funding_queued for clarity
         
         # Note: In a real DB, we would decrease the source's available_amount here (reserved status)
         for source in active_sources:
@@ -244,5 +244,90 @@ class AdvanceService:
         await self.session.commit()
         await self.session.refresh(queue_entry)
         
+        return queue_entry
+
+    async def approve_funding(self, queue_id: UUID, reviewer_id: str, notes: Optional[str] = None) -> Advance:
+        """
+        Human-in-the-loop approval. Triggers payout and creates records.
+        """
+        # 1. Fetch queue entry
+        queue_entry = await self.session.get(FundingQueue, queue_id)
+        if not queue_entry or queue_entry.status != "staged_for_approval":
+            raise HTTPException(status_code=404, detail="Funding request not found or already processed")
+
+        # 2. Fetch related data
+        offer = await self.session.get(FinancingOffer, queue_entry.offer_id)
+        reservation = await self.session.get(CapitalReservation, queue_entry.reservation_id)
+        
+        # 3. Trigger External Payout (Mock)
+        # In production: trigger_unit_payout(destination, queue_entry.amount)
+        print(f"DEBUG: Triggering external capital deployment for {offer.amount} to customer {queue_entry.customer_id}")
+
+        # 4. Create Advance
+        advance = Advance(
+            customer_id=queue_entry.customer_id,
+            amount=offer.amount,
+            fee_amount=offer.fee_amount,
+            status="active",
+            capital_reservation_id=reservation.id
+        )
+        self.session.add(advance)
+        await self.session.flush() # Get advance ID
+
+        # 5. Create Repayment Obligations (Legally traceable)
+        # For simplicity, 1 obligation for total + fee due in 30 days
+        obligation = RepaymentObligation(
+            customer_id=queue_entry.customer_id,
+            advance_id=advance.id,
+            amount=offer.amount + offer.fee_amount,
+            status="pending",
+            due_date=datetime.utcnow() + timedelta(days=30)
+        )
+        self.session.add(obligation)
+
+        # 6. Finalize Statuses
+        queue_entry.status = "paid"
+        queue_entry.reviewer_id = reviewer_id
+        queue_entry.reviewed_at = datetime.utcnow()
+        queue_entry.reviewer_notes = notes
+        
+        offer.status = "funded"
+        reservation.status = "committed"
+        reservation.advance_id = advance.id
+
+        await self.session.commit()
+        await self.session.refresh(advance)
+        return advance
+
+    async def reject_funding(self, queue_id: UUID, reviewer_id: str, reason: str) -> FundingQueue:
+        """
+        Human-in-the-loop rejection. Releases reserved capital.
+        """
+        # 1. Fetch queue entry
+        queue_entry = await self.session.get(FundingQueue, queue_id)
+        if not queue_entry or queue_entry.status != "staged_for_approval":
+            raise HTTPException(status_code=404, detail="Funding request not found or already processed")
+
+        # 2. Fetch related data
+        offer = await self.session.get(FinancingOffer, queue_entry.offer_id)
+        reservation = await self.session.get(CapitalReservation, queue_entry.reservation_id)
+        
+        # 3. Release Capital
+        source = await self.session.get(CapitalSource, reservation.source_id)
+        if source:
+            source.available_amount += offer.amount
+        
+        reservation.status = "released"
+
+        # 4. Finalize Statuses
+        queue_entry.status = "rejected"
+        queue_entry.reviewer_id = reviewer_id
+        queue_entry.reviewed_at = datetime.utcnow()
+        queue_entry.rejection_reason = reason
+        
+        offer.status = "rejected"
+
+        await self.session.commit()
+        await self.session.refresh(queue_entry)
         return queue_entry
 
