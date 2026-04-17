@@ -142,3 +142,23 @@ class CapitalReservation(BaseTenantModel, table=True):
     
     source: CapitalSource = Relationship(back_populates="reservations")
     advance: Optional["Advance"] = Relationship(back_populates="capital_reservation")
+
+class FinancingOffer(BaseTenantModel, table=True):
+    __tablename__ = "financing_offers"
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    snapshot_id: UUID = Field(foreign_key="cash_flow_snapshots.id")
+    amount: float
+    fee_amount: float
+    status: str = Field(default="pending") # pending, accepted, rejected, expired, funding_queued
+    expires_at: datetime
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+class FundingQueue(BaseTenantModel, table=True):
+    """Everything staged for approval and capital reservation before payout."""
+    __tablename__ = "funding_queue"
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    offer_id: UUID = Field(foreign_key="financing_offers.id")
+    reservation_id: UUID = Field(foreign_key="capital_reservations.id")
+    status: str = Field(default="staged_for_approval") # staged_for_approval, approved, rejected, paid
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+

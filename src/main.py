@@ -7,6 +7,8 @@ from uuid import UUID
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from src.webhooks import router as webhooks_router
 from src.reconciliation import reconcile_stripe_data
+from src.services.advance_service import AdvanceService
+from pydantic import BaseModel
 
 app = FastAPI(title="Lend - Embedded Financial Service")
 
@@ -50,6 +52,38 @@ async def get_events(
     result = await session.execute(select(EventLog))
     events = result.scalars().all()
     return events
+
+class FinancingRequest(BaseModel):
+    amount: float
+
+class OfferAcceptance(BaseModel):
+    offer_id: UUID
+
+@app.post("/financing/request")
+async def request_financing(
+    request: FinancingRequest,
+    session: AsyncSession = Depends(get_current_customer_session),
+    x_customer_id: UUID = Header(..., description="The Customer ID")
+):
+    """
+    Evaluates risk engine and generates an offer object.
+    """
+    service = AdvanceService(session)
+    offer = await service.create_financing_offer(x_customer_id, request.amount)
+    return offer
+
+@app.post("/financing/accept")
+async def accept_financing(
+    acceptance: OfferAcceptance,
+    session: AsyncSession = Depends(get_current_customer_session),
+    x_customer_id: UUID = Header(..., description="The Customer ID")
+):
+    """
+    Moves the request into a funding_queue, staged for approval.
+    """
+    service = AdvanceService(session)
+    queue_entry = await service.accept_financing_offer(x_customer_id, acceptance.offer_id)
+    return queue_entry
 
 if __name__ == "__main__":
     uvicorn.run("src.main:app", host="0.0.0.0", port=8000, reload=True)
