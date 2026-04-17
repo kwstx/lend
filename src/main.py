@@ -154,10 +154,17 @@ async def admin_dashboard(
         """
 
     status_indicators = f"""
-    <div style="display:flex; gap:20px; margin-bottom:20px; padding:15px; background:#f1f3f5; border-radius:8px;">
-        <div>Underwriting: <b style="color:{'#e74c3c' if config.underwriting_frozen else '#2ecc71'}">{'FROZEN' if config.underwriting_frozen else 'ACTIVE'}</b></div>
-        <div>Deployment: <b style="color:{'#e74c3c' if config.fund_deployment_paused else '#2ecc71'}">{'PAUSED' if config.fund_deployment_paused else 'ACTIVE'}</b></div>
-        <div>Repayments: <b style="color:{'#e74c3c' if config.repayments_paused else '#2ecc71'}">{'PAUSED' if config.repayments_paused else 'ACTIVE'}</b></div>
+    <div style="display:flex; flex-wrap:wrap; gap:20px; margin-bottom:20px; padding:20px; background:#f8f9fa; border-radius:12px; border: 1px solid #e9ecef;">
+        <div style="flex: 1; min-width: 150px;">Mode: <b style="color:{'#3498db' if config.simulation_mode else '#f39c12'}">{'SIMULATION (Sandbox)' if config.simulation_mode else 'PILOT (Real Money)'}</b></div>
+        <div style="flex: 1; min-width: 150px;">Underwriting: <b style="color:{'#e74c3c' if config.underwriting_frozen else '#2ecc71'}">{'FROZEN' if config.underwriting_frozen else 'ACTIVE'}</b></div>
+        <div style="flex: 1; min-width: 150px;">Deployment: <b style="color:{'#e74c3c' if config.fund_deployment_paused else '#2ecc71'}">{'PAUSED' if config.fund_deployment_paused else 'ACTIVE'}</b></div>
+        <div style="flex: 1; min-width: 150px;">Repayments: <b style="color:{'#e74c3c' if config.repayments_paused else '#2ecc71'}">{'PAUSED' if config.repayments_paused else 'ACTIVE'}</b></div>
+    </div>
+    
+    <div style="display:flex; gap:20px; margin-bottom:20px; padding:20px; background:#fff3cd; border-radius:12px; border: 1px solid #ffeeba; font-size: 0.9em;">
+        <div>Pilot Daily Cap: <b>${config.daily_exposure_cap:,.0f}</b></div>
+        <div>Current Daily Usage: <b style="color:{'#e74c3c' if config.current_daily_deployment >= config.daily_exposure_cap else '#2c3e50'}">${config.current_daily_deployment:,.2f}</b></div>
+        <div>Customer Exposure Cap: <b>${config.per_customer_exposure_cap:,.0f}</b></div>
     </div>
     """
 
@@ -199,7 +206,10 @@ async def admin_dashboard(
                 <h1>Global Financial Controls</h1>
                 {status_indicators}
                 <div style="margin-bottom: 30px;">
-                    <button onclick="toggleSwitch('underwriting_frozen')" style="padding:8px 15px; border-radius:4px; border:1px solid #ccc; cursor:pointer;">Toggle Underwriting</button>
+                    <button onclick="toggleSwitch('simulation_mode')" style="padding:8px 15px; border-radius:4px; border:2px solid {'#3498db' if config.simulation_mode else '#f39c12'}; cursor:pointer; font-weight:bold;">
+                        Switch to {'Real Money' if config.simulation_mode else 'Simulation'}
+                    </button>
+                    <button onclick="toggleSwitch('underwriting_frozen')" style="padding:8px 15px; border-radius:4px; border:1px solid #ccc; cursor:pointer; margin-left:10px;">Toggle Underwriting</button>
                     <button onclick="toggleSwitch('fund_deployment_paused')" style="padding:8px 15px; border-radius:4px; border:1px solid #ccc; cursor:pointer; margin-left:10px;">Toggle Deployment</button>
                     <button onclick="toggleSwitch('repayments_paused')" style="padding:8px 15px; border-radius:4px; border:1px solid #ccc; cursor:pointer; margin-left:10px;">Toggle Repayments</button>
                 </div>
@@ -263,7 +273,7 @@ async def toggle_kill_switch(
     admin: Customer = Depends(require_role(["admin"]))
 ):
     """Strictly Admin-only kill switch toggle."""
-    if switch_name not in ["underwriting_frozen", "fund_deployment_paused", "repayments_paused"]:
+    if switch_name not in ["underwriting_frozen", "fund_deployment_paused", "repayments_paused", "simulation_mode"]:
         raise HTTPException(status_code=400, detail="Invalid switch name")
         
     config_result = await session.execute(select(SystemConfig).where(SystemConfig.id == 1))

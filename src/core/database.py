@@ -15,7 +15,7 @@ async def init_db():
     async with engine.begin() as conn:
         # This will create tables, but we will use Alembic for production
         # For now, let's include it for local dev
-        # SQLModel.metadata.create_all(conn)
+        await conn.run_sync(SQLModel.metadata.create_all)
         pass
 
 async def get_session() -> AsyncSession:

@@ -1,12 +1,12 @@
 from uuid import UUID
 from typing import Optional
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, desc
+from sqlalchemy import select, desc, func, and_
 from fastapi import HTTPException
 
 from src.models.models import (
     Advance, CapitalSource, CashFlowSnapshot, Customer, 
-    CapitalReservation, FinancingOffer, FundingQueue
+    CapitalReservation, FinancingOffer, FundingQueue, SystemConfig, RepaymentObligation
 )
 from src.risk_engine import RiskEngine
 from src.core.capital import CapitalManager
@@ -299,11 +299,52 @@ class AdvanceService:
         offer = await self.session.get(FinancingOffer, queue_entry.offer_id)
         reservation = await self.session.get(CapitalReservation, queue_entry.reservation_id)
         
-        # 3. Trigger External Payout (Mock)
-        # In production: trigger_unit_payout(destination, queue_entry.amount)
-        print(f"DEBUG: Triggering external capital deployment for {offer.amount} to customer {queue_entry.customer_id}")
+        # 3. Check System Configuration & Caps
+        config_result = await self.session.execute(select(SystemConfig).where(SystemConfig.id == 1))
+        config = config_result.scalars().first()
+        
+        if not config:
+            config = SystemConfig(id=1)
+            self.session.add(config)
+            await self.session.flush()
 
-        # 4. Create Advance
+        # Enforce Real-Money Pilot Caps if NOT in simulation mode
+        if not config.simulation_mode:
+            # Check per-customer exposure cap
+            total_active_stmt = select(func.sum(Advance.amount)).where(
+                and_(Advance.customer_id == queue_entry.customer_id, Advance.status == "active")
+            )
+            total_active_result = await self.session.execute(total_active_stmt)
+            current_exposure = total_active_result.scalar() or 0.0
+            
+            if current_exposure + offer.amount > config.per_customer_exposure_cap:
+                raise HTTPException(
+                    status_code=403, 
+                    detail=f"Real-money pilot limit exceeded: Customer exposure cap is ${config.per_customer_exposure_cap:,.2f}"
+                )
+            
+            # Check daily global exposure cap
+            # (Note: In a high-concurrency environment, this would need an atomic counter or redis lock)
+            if config.current_daily_deployment + offer.amount > config.daily_exposure_cap:
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"Real-money pilot limit exceeded: Global daily limit is ${config.daily_exposure_cap:,.2f}"
+                )
+            
+            config.current_daily_deployment += offer.amount
+
+        # 4. Trigger External Payout
+        if config.simulation_mode:
+            # STRIPE TEST MODE / PLAID SANDBOX
+            print(f"SIMULATION: Triggering SANDBOX capital deployment for {offer.amount} to customer {queue_entry.customer_id}")
+            # Mock successful sandbox payout
+        else:
+            # REAL MONEY PILOT
+            print(f"PILOT: Triggering PRODUCTION capital deployment for {offer.amount} to customer {queue_entry.customer_id}")
+            # Here you would call Unit/Stripe/etc Production API
+            # For this exercise, we'll keep it as a print statement representing the call.
+
+        # 5. Create Advance
         advance = Advance(
             customer_id=queue_entry.customer_id,
             amount=offer.amount,

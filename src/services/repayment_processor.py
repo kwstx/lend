@@ -5,7 +5,7 @@ from typing import List, Dict, Any, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_
 from src.models.models import (
-    EventLog, Transaction, Advance, RepaymentObligation, Customer, Receivable
+    EventLog, Transaction, Advance, RepaymentObligation, Customer, Receivable, SystemConfig
 )
 from src.intelligence import CashFlowIntelligence
 from src.core.observability import AuditLogger
@@ -84,7 +84,7 @@ class RepaymentProcessor:
 
         # 1. Auditability & Idempotency: Create Transaction record
         # Check if transaction already exists for this event
-        tx_stmt = select(Transaction).where(Transaction.metadata["event_id"].astext == str(event.id))
+        tx_stmt = select(Transaction).where(Transaction.context_data["event_id"].astext == str(event.id))
         existing_tx = await self.session.execute(tx_stmt)
         transaction = existing_tx.scalars().first()
 
@@ -97,7 +97,7 @@ class RepaymentProcessor:
                 timestamp=datetime.fromtimestamp(invoice.get("status_transitions", {}).get("paid_at", datetime.now().timestamp())),
                 payer_id=invoice.get("customer"),
                 payer_name=invoice.get("customer_name") or invoice.get("customer_email"),
-                metadata={"source": "stripe", "invoice_id": invoice.get("id"), "event_id": str(event.id)}
+                context_data={"source": "stripe", "invoice_id": invoice.get("id"), "event_id": str(event.id)}
             )
             self.session.add(transaction)
             await self.session.flush() # Ensure we have transaction.id for repayment logs

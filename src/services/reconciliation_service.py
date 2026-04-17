@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_, func
 from src.models.models import (
     Customer, Advance, RepaymentObligation, Transaction, 
-    ReconciliationException, EventLog, BaseTenantModel
+    ReconciliationException, EventLog, BaseTenantModel, SystemConfig
 )
 from src.core.database import set_tenant_context
 from src.core.observability import AuditLogger
@@ -120,8 +120,20 @@ class ReconciliationService:
         """Verifies internal Transactions against Stripe Invoice history."""
         exceptions_found = 0
         try:
+            # Check Simulation Mode
+            config_result = await self.session.execute(select(SystemConfig).where(SystemConfig.id == 1))
+            config = config_result.scalars().first()
+            
+            if config and config.simulation_mode:
+                # Use STRIPE_TEST_KEY if available, otherwise just mock it
+                logger.info(f"SIMULATION: Reconciling Stripe for customer {customer.id} in TEST MODE")
+                # In simulation mode, we might just return empty or use a specific test key
+                # stripe.api_key = os.getenv("STRIPE_TEST_SECRET_KEY")
+            else:
+                logger.info(f"PILOT: Reconciling Stripe for customer {customer.id} in PRODUCTION")
+                # stripe.api_key = os.getenv("STRIPE_LIVE_SECRET_KEY")
+
             # Fetch recent paid invoices from Stripe
-            # In production, we'd use a cursor-based approach or look back a few days
             lookback = int((datetime.now() - timedelta(days=3)).timestamp())
             invoices = stripe.Invoice.list(
                 limit=100,
@@ -134,7 +146,7 @@ class ReconciliationService:
                 inv_id = inv["id"]
                 # Check if we have a transaction for this invoice
                 tx_stmt = select(Transaction).where(
-                    Transaction.metadata["invoice_id"].astext == inv_id
+                    Transaction.context_data["invoice_id"].astext == inv_id
                 )
                 tx_result = await self.session.execute(tx_stmt)
                 if not tx_result.scalars().first():

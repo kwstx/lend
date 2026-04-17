@@ -69,7 +69,7 @@ class Transaction(BaseTenantModel, table=True):
     timestamp: datetime = Field(default_factory=datetime.utcnow)
     payer_id: Optional[str] = Field(default=None, index=True) # External payer ID (e.g. Stripe Customer ID)
     payer_name: Optional[str] = Field(default=None, index=True)
-    metadata: Dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    context_data: Dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
 
 class CashFlowSnapshot(BaseTenantModel, table=True):
     """Aggregated state for credit limit calculations (versioned)"""
@@ -200,9 +200,16 @@ class SystemConfig(SQLModel, table=True):
     fund_deployment_paused: bool = Field(default=False)
     repayments_paused: bool = Field(default=False)
     
+    # Simulation Mode
+    simulation_mode: bool = Field(default=True) # Defaults to True for safety (sandbox first)
+    
     # Global Limits
     max_global_daily_deployment: float = Field(default=1000000.0)
     current_daily_deployment: float = Field(default=0.0)
+    
+    # Pilot Mode Caps (Strict exposure caps per customer and per day)
+    per_customer_exposure_cap: float = Field(default=5000.0) # $5k limit for pilot customers
+    daily_exposure_cap: float = Field(default=50000.0) # $50k global daily limit in pilot mode
     
     updated_at: datetime = Field(default_factory=datetime.utcnow)
     updated_by: Optional[str] = None
