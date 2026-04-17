@@ -190,3 +190,42 @@ class ReconciliationException(BaseTenantModel, table=True):
     
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
+class SystemConfig(SQLModel, table=True):
+    """Global system state and kill switches."""
+    __tablename__ = "system_configs"
+    id: int = Field(default=1, primary_key=True)
+    
+    # Financial Kill Switches
+    underwriting_frozen: bool = Field(default=False)
+    fund_deployment_paused: bool = Field(default=False)
+    repayments_paused: bool = Field(default=False)
+    
+    # Global Limits
+    max_global_daily_deployment: float = Field(default=1000000.0)
+    current_daily_deployment: float = Field(default=0.0)
+    
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_by: Optional[str] = None
+
+class TenantApiKey(SQLModel, table=True):
+    """API Keys for tenant authentication."""
+    __tablename__ = "tenant_api_keys"
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    tenant_id: UUID = Field(foreign_key="customers.id", index=True)
+    hashed_key: str = Field(index=True)
+    prefix: str # First 8 chars for identification
+    name: str # e.g. "Production Key"
+    is_active: bool = Field(default=True)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    last_used_at: Optional[datetime] = None
+
+class AdminUser(SQLModel, table=True):
+    """Internal users with RBAC."""
+    __tablename__ = "admin_users"
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    email: str = Field(unique=True, index=True)
+    hashed_password: str
+    role: str = Field(default="viewer") # viewer, operations, admin, super_admin
+    is_active: bool = Field(default=True)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+

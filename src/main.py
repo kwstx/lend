@@ -3,14 +3,22 @@ from fastapi import FastAPI, Depends, HTTPException, Header
 from sqlalchemy.ext.asyncio import AsyncSession
 from src.core.database import get_session, set_tenant_context
 from src.core.observability import setup_logging
+from src.core.security import (
+    get_current_tenant, get_current_admin, require_role,
+    check_underwriting_frozen, check_deployment_paused, check_repayments_paused
+)
+from src.core.rate_limiting import rate_limit_tenant, rate_limit_admin
 from src.reconciliation import run_reconciliation_job
 from src.services.advance_service import AdvanceService
 from src.services.repayment_processor import RepaymentProcessor
-from src.models.models import Customer, EventLog, FundingQueue, FinancingOffer, ReconciliationException
+from src.models.models import (
+    Customer, EventLog, FundingQueue, FinancingOffer, 
+    ReconciliationException, SystemConfig
+)
 from uuid import UUID
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from src.webhooks import router as webhooks_router
-from sqlalchemy import select, desc
+from sqlalchemy import select, desc, update
 from pydantic import BaseModel
 from fastapi.responses import HTMLResponse
 from datetime import datetime
@@ -20,15 +28,14 @@ app = FastAPI(title="Lend - Embedded Financial Service")
 # Initialize structured logs
 setup_logging()
 
-async def get_current_customer_session(
-    session: AsyncSession = Depends(get_session),
-    x_customer_id: UUID = Header(..., description="The Customer ID for multi-tenant isolation")
+async def get_authenticated_tenant_session(
+    tenant: Customer = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_session)
 ) -> AsyncSession:
     """
-    Dependency that ensures the tenant context is set for every request.
-    In a real app, this would be verified via JWT/Auth.
+    Dependency that ensures the tenant is authenticated via API Key.
+    RLS context is already set inside get_current_tenant.
     """
-    await set_tenant_context(session, str(x_customer_id))
     return session
 
 @app.get("/")
@@ -76,40 +83,48 @@ class FinancingRequest(BaseModel):
 class OfferAcceptance(BaseModel):
     offer_id: UUID
 
-@app.post("/financing/request")
+@app.post("/financing/request", dependencies=[Depends(rate_limit_tenant), Depends(check_underwriting_frozen)])
 async def request_financing(
     request: FinancingRequest,
-    session: AsyncSession = Depends(get_current_customer_session),
-    x_customer_id: UUID = Header(..., description="The Customer ID")
+    session: AsyncSession = Depends(get_authenticated_tenant_session),
+    tenant: Customer = Depends(get_current_tenant)
 ):
     """
     Evaluates risk engine and generates an offer object.
+    Auth: API Key
+    Gate: Rate Limiting, Underwriting Kill Switch
     """
     service = AdvanceService(session)
-    offer = await service.create_financing_offer(x_customer_id, request.amount)
+    offer = await service.create_financing_offer(tenant.id, request.amount)
     return offer
 
-@app.post("/financing/accept")
+@app.post("/financing/accept", dependencies=[Depends(rate_limit_tenant), Depends(check_deployment_paused)])
 async def accept_financing(
     acceptance: OfferAcceptance,
-    session: AsyncSession = Depends(get_current_customer_session),
-    x_customer_id: UUID = Header(..., description="The Customer ID")
+    session: AsyncSession = Depends(get_authenticated_tenant_session),
+    tenant: Customer = Depends(get_current_tenant)
 ):
     """
     Moves the request into a funding_queue, staged for approval.
+    Auth: API Key
+    Gate: Rate Limiting, Deployment Kill Switch
     """
     service = AdvanceService(session)
-    queue_entry = await service.accept_financing_offer(x_customer_id, acceptance.offer_id)
+    queue_entry = await service.accept_financing_offer(tenant.id, acceptance.offer_id)
     return queue_entry
 
 # --- Admin Interface ---
 
 @app.get("/admin/funding-queue", response_class=HTMLResponse)
-async def admin_dashboard(session: AsyncSession = Depends(get_session)):
+async def admin_dashboard(
+    session: AsyncSession = Depends(get_session),
+    admin: Customer = Depends(require_role(["operations", "admin"]))
+):
     """
-    Simulated Admin Dashboard for operations to review funding requests.
-    In a real app, this would be protected by admin-only auth.
+    Protected Admin Dashboard.
+    Auth: JWT (Operations+)
     """
+    # ... (existing logic for fetching items)
     stmt = (
         select(FundingQueue, Customer, FinancingOffer)
         .join(Customer, FundingQueue.customer_id == Customer.id)
@@ -119,6 +134,10 @@ async def admin_dashboard(session: AsyncSession = Depends(get_session)):
     )
     result = await session.execute(stmt)
     items = result.all()
+    
+    # Check current system status
+    config_result = await session.execute(select(SystemConfig).where(SystemConfig.id == 1))
+    config = config_result.scalars().first()
 
     rows = ""
     for queue, customer, offer in items:
@@ -128,11 +147,19 @@ async def admin_dashboard(session: AsyncSession = Depends(get_session)):
             <td style="padding: 12px;">${offer.amount:,.2f}</td>
             <td style="padding: 12px;">{queue.created_at.strftime('%Y-%m-%d %H:%M')}</td>
             <td style="padding: 12px;">
-                <button onclick="approve('{queue.id}')" style="background:#2ecc71; color:white; border:none; padding:6-12px; border-radius:4px; cursor:pointer;">Approve</button>
-                <button onclick="reject('{queue.id}')" style="background:#e74c3c; color:white; border:none; padding:6-12px; border-radius:4px; cursor:pointer; margin-left:8px;">Reject</button>
+                <button onclick="approve('{queue.id}')" style="background:#2ecc71; color:white; border:none; padding:6px 12px; border-radius:4px; cursor:pointer;">Approve</button>
+                <button onclick="reject('{queue.id}')" style="background:#e74c3c; color:white; border:none; padding:6px 12px; border-radius:4px; cursor:pointer; margin-left:8px;">Reject</button>
             </td>
         </tr>
         """
+
+    status_indicators = f"""
+    <div style="display:flex; gap:20px; margin-bottom:20px; padding:15px; background:#f1f3f5; border-radius:8px;">
+        <div>Underwriting: <b style="color:{'#e74c3c' if config.underwriting_frozen else '#2ecc71'}">{'FROZEN' if config.underwriting_frozen else 'ACTIVE'}</b></div>
+        <div>Deployment: <b style="color:{'#e74c3c' if config.fund_deployment_paused else '#2ecc71'}">{'PAUSED' if config.fund_deployment_paused else 'ACTIVE'}</b></div>
+        <div>Repayments: <b style="color:{'#e74c3c' if config.repayments_paused else '#2ecc71'}">{'PAUSED' if config.repayments_paused else 'ACTIVE'}</b></div>
+    </div>
+    """
 
     html_content = f"""
     <html>
@@ -150,6 +177,7 @@ async def admin_dashboard(session: AsyncSession = Depends(get_session)):
                      const notes = prompt("Reviewer Notes (Optional)");
                      const res = await fetch(`/admin/funding/${{id}}/approve?notes=${{encodeURIComponent(notes || '')}}`, {{ method: 'POST' }});
                      if (res.ok) {{ alert('Capital deployed successfully!'); location.reload(); }}
+                     else if (res.status === 503) alert('Deployment is currently PAUSED globally.');
                      else alert('Error approving request');
                 }}
                 async function reject(id) {{
@@ -159,12 +187,24 @@ async def admin_dashboard(session: AsyncSession = Depends(get_session)):
                      if (res.ok) {{ alert('Request rejected.'); location.reload(); }}
                      else alert('Error rejecting request');
                 }}
+                async function toggleSwitch(name) {{
+                    const res = await fetch(`/admin/system/kill-switch/${{name}}/toggle`, {{ method: 'POST' }});
+                    if (res.ok) location.reload();
+                    else alert('Error toggling switch');
+                }}
             </script>
         </head>
         <body>
             <div class="container">
+                <h1>Global Financial Controls</h1>
+                {status_indicators}
+                <div style="margin-bottom: 30px;">
+                    <button onclick="toggleSwitch('underwriting_frozen')" style="padding:8px 15px; border-radius:4px; border:1px solid #ccc; cursor:pointer;">Toggle Underwriting</button>
+                    <button onclick="toggleSwitch('fund_deployment_paused')" style="padding:8px 15px; border-radius:4px; border:1px solid #ccc; cursor:pointer; margin-left:10px;">Toggle Deployment</button>
+                    <button onclick="toggleSwitch('repayments_paused')" style="padding:8px 15px; border-radius:4px; border:1px solid #ccc; cursor:pointer; margin-left:10px;">Toggle Repayments</button>
+                </div>
+
                 <h1>Funding Approval Queue (HITL)</h1>
-                <p>Reviewexposure and finalize capital deployment decisions.</p>
                 <table>
                     <thead>
                         <tr>
@@ -184,35 +224,62 @@ async def admin_dashboard(session: AsyncSession = Depends(get_session)):
     """
     return HTMLResponse(content=html_content)
 
-@app.post("/admin/funding/{queue_id}/approve")
+@app.post("/admin/funding/{queue_id}/approve", dependencies=[Depends(check_deployment_paused)])
 async def approve_funding_request(
     queue_id: UUID, 
     notes: str = "",
-    session: AsyncSession = Depends(get_session)
+    session: AsyncSession = Depends(get_session),
+    admin: Customer = Depends(require_role(["operations", "admin"]))
 ):
     service = AdvanceService(session)
-    # Using 'admin_ops' as hardcoded reviewer for now
-    advance = await service.approve_funding(queue_id, reviewer_id="admin_ops", notes=notes)
+    advance = await service.approve_funding(queue_id, reviewer_id=admin.email, notes=notes)
     return advance
 
 @app.post("/admin/funding/{queue_id}/reject")
 async def reject_funding_request(
     queue_id: UUID, 
     reason: str,
-    session: AsyncSession = Depends(get_session)
+    session: AsyncSession = Depends(get_session),
+    admin: Customer = Depends(require_role(["operations", "admin"]))
 ):
     service = AdvanceService(session)
-    result = await service.reject_funding(queue_id, reviewer_id="admin_ops", reason=reason)
+    result = await service.reject_funding(queue_id, reviewer_id=admin.email, reason=reason)
     return result
 
-@app.post("/admin/repayments/process-now")
+@app.post("/admin/repayments/process-now", dependencies=[Depends(check_repayments_paused)])
 async def trigger_repayment_processing(
-    session: AsyncSession = Depends(get_session)
+    session: AsyncSession = Depends(get_session),
+    admin: Customer = Depends(require_role(["operations", "admin"]))
 ):
     """Manual trigger for the controlled event processor."""
     processor = RepaymentProcessor(session)
     count = await processor.process_pending_events()
     return {"status": "success", "processed_events": count}
+
+@app.post("/admin/system/kill-switch/{switch_name}/toggle")
+async def toggle_kill_switch(
+    switch_name: str,
+    session: AsyncSession = Depends(get_session),
+    admin: Customer = Depends(require_role(["admin"]))
+):
+    """Strictly Admin-only kill switch toggle."""
+    if switch_name not in ["underwriting_frozen", "fund_deployment_paused", "repayments_paused"]:
+        raise HTTPException(status_code=400, detail="Invalid switch name")
+        
+    config_result = await session.execute(select(SystemConfig).where(SystemConfig.id == 1))
+    config = config_result.scalars().first()
+    
+    if not config:
+        config = SystemConfig(id=1)
+        session.add(config)
+    
+    current_val = getattr(config, switch_name)
+    setattr(config, switch_name, not current_val)
+    config.updated_at = datetime.utcnow()
+    config.updated_by = admin.email
+    
+    await session.commit()
+    return {"status": "success", "new_state": getattr(config, switch_name)}
 
 @app.get("/admin/exceptions", response_class=HTMLResponse)
 async def exceptions_dashboard(session: AsyncSession = Depends(get_session)):

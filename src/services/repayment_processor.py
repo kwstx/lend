@@ -26,6 +26,14 @@ class RepaymentProcessor:
         Main loop to process all events marked as 'pending'.
         This ensures repayments are handled in a controlled, serializable manner.
         """
+        # Check global kill switch
+        from src.models.models import SystemConfig
+        config_result = await self.session.execute(select(SystemConfig).where(SystemConfig.id == 1))
+        config = config_result.scalars().first()
+        if config and config.repayments_paused:
+            logger.warning("Repayment processing is currently paused globally via kill switch.")
+            return 0
+
         stmt = (
             select(EventLog)
             .where(EventLog.processing_status == "pending")
