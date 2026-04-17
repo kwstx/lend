@@ -95,57 +95,18 @@ async def stripe_webhook(
     # Set tenant context for RLS
     await set_tenant_context(session, str(customer.id))
 
-    # Process event
-    if event["type"] == "invoice.payment_succeeded":
-        invoice = event["data"]["object"]
-        # Create/Update Receivable
-        ext_id = invoice["id"]
-        receivable_result = await session.execute(
-            select(Receivable).where(Receivable.external_id == ext_id)
-        )
-        receivable = receivable_result.scalars().first()
-        
-        if not receivable:
-            receivable = Receivable(
-                customer_id=customer.id,
-                external_id=ext_id,
-                amount=invoice["amount_paid"] / 100.0,
-                currency=invoice["currency"],
-                due_date=datetime.fromtimestamp(invoice.get("due_date", datetime.now().timestamp())),
-                status="paid"
-            )
-            session.add(receivable)
-        else:
-            receivable.status = "paid"
-        
-        # Create Transaction
-        transaction = Transaction(
-            customer_id=customer.id,
-            amount=invoice["amount_paid"] / 100.0,
-            type="inflow",
-            category="sales",
-            timestamp=datetime.fromtimestamp(invoice["status_transitions"]["paid_at"]),
-            payer_id=invoice.get("customer"), # Stripe Customer ID
-            payer_name=invoice.get("customer_name") or invoice.get("customer_email"),
-            metadata={"source": "stripe", "invoice_id": ext_id}
-        )
-        session.add(transaction)
-        
-        # Trigger Snapshot Update
-        intel = CashFlowIntelligence(session)
-        await intel.compute_and_save_snapshot(customer.id)
-
-    # Log event for idempotency
+    # Log event for later processing
     event_log = EventLog(
         customer_id=customer.id,
         event_type=f"stripe_{event['type']}",
         payload=event.to_dict(),
-        idempotency_key=f"stripe_{event_id}"
+        idempotency_key=f"stripe_{event_id}",
+        processing_status="pending"
     )
     session.add(event_log)
     
     await session.commit()
-    return {"status": "success"}
+    return {"status": "event_logged"}
 
 @router.post("/plaid")
 async def plaid_webhook(
@@ -184,31 +145,15 @@ async def plaid_webhook(
     if existing_event.scalars().first():
         return {"status": "already_processed"}
 
-    if payload["webhook_code"] == "DEFAULT_UPDATE":
-        # In a real app, this would trigger a background task to call /transactions/get
-        # Here we mock the ingestion of a transaction
-        transaction = Transaction(
-            customer_id=customer.id,
-            amount=payload.get("new_transactions", 0) * 100.0, # Dummy logic
-            type="inflow",
-            category="subscription",
-            payer_id="plaid_unknown", # Plaid doesn't always expose this in webhooks
-            metadata={"source": "plaid", "item_id": item_id}
-        )
-        session.add(transaction)
-        
-        # Trigger Snapshot Update
-        intel = CashFlowIntelligence(session)
-        await intel.compute_and_save_snapshot(customer.id)
-
-    # Log event
+    # Log event for later processing
     event_log = EventLog(
         customer_id=customer.id,
         event_type=f"plaid_{payload['webhook_code']}",
         payload=payload,
-        idempotency_key=idempotency_key
+        idempotency_key=idempotency_key,
+        processing_status="pending"
     )
     session.add(event_log)
     
     await session.commit()
-    return {"status": "success"}
+    return {"status": "event_logged"}

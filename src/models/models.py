@@ -38,6 +38,7 @@ class Advance(BaseTenantModel, table=True):
     amount: float
     fee_amount: float
     status: str = Field(default="active") # active, repaid, defaulted
+    repayment_rate: float = Field(default=0.15) # 15% of eligible revenue
     created_at: datetime = Field(default_factory=datetime.utcnow)
     
     customer: Customer = Relationship(back_populates="advances")
@@ -113,6 +114,8 @@ class EventLog(BaseTenantModel, table=True):
     event_type: str # receivable_created, advance_funded, repayment_processed, etc.
     payload: Dict[str, Any] = Field(sa_column=Column(JSON))
     idempotency_key: str = Field(unique=True, index=True)
+    processing_status: str = Field(default="pending", index=True) # pending, processed, failed, skipped
+    error_message: Optional[str] = Field(default=None)
     created_at: datetime = Field(default_factory=datetime.utcnow)
     
     customer: Customer = Relationship(back_populates="events")

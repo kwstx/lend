@@ -9,6 +9,7 @@ from src.webhooks import router as webhooks_router
 from sqlalchemy import select, desc
 from src.reconciliation import reconcile_stripe_data
 from src.services.advance_service import AdvanceService
+from src.services.repayment_processor import RepaymentProcessor
 from pydantic import BaseModel
 from fastapi.responses import HTMLResponse
 
@@ -38,6 +39,15 @@ async def startup_event():
     scheduler = AsyncIOScheduler()
     # Run reconciliation every 6 hours
     scheduler.add_job(reconcile_stripe_data, "interval", hours=6)
+    
+    # Process repayments every 5 minutes
+    async def process_repayments_job():
+        from src.core.database import SessionLocal
+        async with SessionLocal() as session:
+            processor = RepaymentProcessor(session)
+            await processor.process_pending_events()
+
+    scheduler.add_job(process_repayments_job, "interval", minutes=5)
     scheduler.start()
 
 app.include_router(webhooks_router)
@@ -189,6 +199,15 @@ async def reject_funding_request(
     service = AdvanceService(session)
     result = await service.reject_funding(queue_id, reviewer_id="admin_ops", reason=reason)
     return result
+
+@app.post("/admin/repayments/process-now")
+async def trigger_repayment_processing(
+    session: AsyncSession = Depends(get_session)
+):
+    """Manual trigger for the controlled event processor."""
+    processor = RepaymentProcessor(session)
+    count = await processor.process_pending_events()
+    return {"status": "success", "processed_events": count}
 
 if __name__ == "__main__":
     uvicorn.run("src.main:app", host="0.0.0.0", port=8000, reload=True)
