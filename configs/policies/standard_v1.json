@@ -1,0 +1,11 @@
+{
+  "version": "1.0.0",
+  "name": "Standard Underwriting Policy",
+  "rules": {
+    "min_operating_history_days": 60,
+    "max_revenue_volatility": 0.4,
+    "max_customer_concentration": 0.5,
+    "revenue_multiplier": 0.8,
+    "max_exposure_cap": 25000.0
+  }
+}

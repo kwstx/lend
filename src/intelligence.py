@@ -4,17 +4,25 @@ from uuid import UUID
 from sqlalchemy import text, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
-from src.models.models import CashFlowSnapshot, Transaction, Receivable, Advance
+from src.models.models import CashFlowSnapshot, Transaction, Receivable, Advance, Customer
+from src.risk_engine import RiskEngine
 
 class CashFlowIntelligence:
     def __init__(self, session: AsyncSession):
         self.session = session
+        self.risk_engine = RiskEngine()
 
     async def compute_and_save_snapshot(self, customer_id: UUID) -> CashFlowSnapshot:
         """
         Computes rolling metrics for a customer using deterministic SQL queries
         and saves a versioned snapshot.
         """
+        # 0. Fetch Customer Info
+        customer_res = await self.session.execute(select(Customer).where(Customer.id == customer_id))
+        customer = customer_res.scalar_one_or_none()
+        if not customer:
+            raise ValueError(f"Customer {customer_id} not found")
+
         # 1. Trailing Revenue (30d and 90d)
         # We use raw SQL for performance and to ensure it's a single deterministic operation
         revenue_query = text("""
@@ -85,7 +93,7 @@ class CashFlowIntelligence:
         """)
         res = await self.session.execute(concentration_query, {"cid": customer_id, "d90": d90})
         conc_row = res.fetchone()
-        concentration_risk = conc_row.concentration if conc_row else 0.0
+        concentration_risk_score = conc_row.concentration if conc_row else 0.0
 
         # 4. Inflow Classification (True Revenue vs Transfers/Refunds)
         classification_query = text("""
@@ -118,10 +126,18 @@ class CashFlowIntelligence:
         open_receivables = recv_res.scalar() or 0.0
         active_advances = adv_res.scalar() or 0.0
         
-        # Determine credit limit (Business Logic: 80% of open receivables minus active advances)
-        credit_limit = max(0, (open_receivables * 0.8) - active_advances)
+        # 6. Risk Evaluation
+        operating_history_days = (now - customer.created_at).days
+        metrics = {
+            "revenue_stability_score": stability_score,
+            "concentration_risk_score": concentration_risk_score,
+            "total_open_receivables": open_receivables,
+            "active_advances_total": active_advances
+        }
+        
+        evaluation = self.risk_engine.evaluate_customer(metrics, operating_history_days)
 
-        # 6. Create Snapshot
+        # 7. Create Snapshot
         snapshot = CashFlowSnapshot(
             customer_id=customer_id,
             calculated_at=now,
@@ -133,8 +149,13 @@ class CashFlowIntelligence:
             other_inflow_30d=other_inflow_30d,
             total_open_receivables=open_receivables,
             active_advances_total=active_advances,
-            available_credit_limit=credit_limit,
-            calculation_version="v1.0"
+            available_credit_limit=evaluation.credit_limit,
+            calculation_version="v2.0",
+            # Risk Evaluation Fields
+            is_eligible=evaluation.is_eligible,
+            rejection_reasons=evaluation.rejection_reasons,
+            policy_version=evaluation.policy_version,
+            risk_evaluation_metadata=evaluation.metadata
         )
         
         self.session.add(snapshot)

@@ -95,6 +95,12 @@ class CashFlowSnapshot(BaseTenantModel, table=True):
     # Metadata for reconstruction
     calculation_version: str = Field(default="v1")
     confidence_score: float = Field(default=1.0)
+    
+    # Risk Evaluation Results
+    is_eligible: bool = Field(default=True)
+    rejection_reasons: Optional[List[str]] = Field(default=None, sa_column=Column(JSON))
+    policy_version: Optional[str] = Field(default=None)
+    risk_evaluation_metadata: Optional[Dict[str, Any]] = Field(default=None, sa_column=Column(JSON))
 
 class EventLog(BaseTenantModel, table=True):
     """Immutable log of every state change"""
