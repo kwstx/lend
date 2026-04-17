@@ -3,8 +3,10 @@ from fastapi import FastAPI, Depends, HTTPException, Header
 from sqlalchemy.ext.asyncio import AsyncSession
 from src.core.database import get_session, set_tenant_context
 from src.models.models import Customer, EventLog
-from sqlmodel import select
 from uuid import UUID
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from src.webhooks import router as webhooks_router
+from src.reconciliation import reconcile_stripe_data
 
 app = FastAPI(title="Lend - Embedded Financial Service")
 
@@ -26,6 +28,15 @@ async def root():
 @app.get("/health")
 async def health_check():
     return {"status": "healthy"}
+
+@app.on_event("startup")
+async def startup_event():
+    scheduler = AsyncIOScheduler()
+    # Run reconciliation every 6 hours
+    scheduler.add_job(reconcile_stripe_data, "interval", hours=6)
+    scheduler.start()
+
+app.include_router(webhooks_router)
 
 # Example endpoint showing tenant isolation
 @app.get("/events")

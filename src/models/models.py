@@ -11,6 +11,8 @@ class Customer(SQLModel, table=True):
     id: UUID = Field(default_factory=uuid4, primary_key=True)
     name: str
     email: str = Field(unique=True, index=True)
+    stripe_account_id: Optional[str] = Field(default=None, index=True)
+    plaid_item_id: Optional[str] = Field(default=None, index=True)
     created_at: datetime = Field(default_factory=datetime.utcnow)
     
     # Relationships

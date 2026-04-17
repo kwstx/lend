@@ -8,3 +8,8 @@ python-dotenv
 alembic
 asyncpg
 sqlmodel
+stripe
+plaid-python
+apscheduler
+python-jose[cryptography]
+cryptography
