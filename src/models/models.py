@@ -172,3 +172,20 @@ class FundingQueue(BaseTenantModel, table=True):
 
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
+class ReconciliationException(BaseTenantModel, table=True):
+    """Logs mismatches between internal ledger and external provider state for manual review."""
+    __tablename__ = "reconciliation_exceptions"
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    exception_type: str # balance_mismatch, missing_repayment, external_record_mismatch
+    severity: str = Field(default="critical") # critical, warning
+    
+    internal_state: Dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    external_state: Dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    
+    resolution_status: str = Field(default="unresolved") # unresolved, resolved, ignored
+    resolved_at: Optional[datetime] = None
+    resolved_by: Optional[str] = None
+    notes: Optional[str] = None
+    
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+

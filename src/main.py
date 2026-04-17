@@ -2,16 +2,17 @@ import uvicorn
 from fastapi import FastAPI, Depends, HTTPException, Header
 from sqlalchemy.ext.asyncio import AsyncSession
 from src.core.database import get_session, set_tenant_context
-from src.models.models import Customer, EventLog, FundingQueue, FinancingOffer
+from src.reconciliation import run_reconciliation_job
+from src.services.advance_service import AdvanceService
+from src.services.repayment_processor import RepaymentProcessor
+from src.models.models import Customer, EventLog, FundingQueue, FinancingOffer, ReconciliationException
 from uuid import UUID
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from src.webhooks import router as webhooks_router
 from sqlalchemy import select, desc
-from src.reconciliation import reconcile_stripe_data
-from src.services.advance_service import AdvanceService
-from src.services.repayment_processor import RepaymentProcessor
 from pydantic import BaseModel
 from fastapi.responses import HTMLResponse
+from datetime import datetime
 
 app = FastAPI(title="Lend - Embedded Financial Service")
 
@@ -38,7 +39,7 @@ async def health_check():
 async def startup_event():
     scheduler = AsyncIOScheduler()
     # Run reconciliation every 6 hours
-    scheduler.add_job(reconcile_stripe_data, "interval", hours=6)
+    scheduler.add_job(run_reconciliation_job, "interval", hours=6)
     
     # Process repayments every 5 minutes
     async def process_repayments_job():
@@ -208,6 +209,131 @@ async def trigger_repayment_processing(
     processor = RepaymentProcessor(session)
     count = await processor.process_pending_events()
     return {"status": "success", "processed_events": count}
+
+@app.get("/admin/exceptions", response_class=HTMLResponse)
+async def exceptions_dashboard(session: AsyncSession = Depends(get_session)):
+    """
+    Simulated Admin Dashboard for viewing and resolving reconciliation exceptions.
+    """
+    stmt = (
+        select(ReconciliationException, Customer)
+        .join(Customer, ReconciliationException.customer_id == Customer.id)
+        .where(ReconciliationException.resolution_status == "unresolved")
+        .order_by(ReconciliationException.created_at.desc())
+    )
+    result = await session.execute(stmt)
+    items = result.all()
+
+    rows = ""
+    for exc, customer in items:
+        color = "#e74c3c" if exc.severity == "critical" else "#f39c12"
+        rows += f"""
+        <tr style="border-bottom: 1px solid #eee;">
+            <td style="padding: 12px;"><span style="color: {color}; font-weight: bold;">{exc.severity.upper()}</span></td>
+            <td style="padding: 12px;">{customer.name}</td>
+            <td style="padding: 12px;">{exc.exception_type}</td>
+            <td style="padding: 12px; font-size: 0.85em; max-width: 300px; overflow: hidden; text-overflow: ellipsis;">{exc.notes}</td>
+            <td style="padding: 12px;">{exc.created_at.strftime('%Y-%m-%d %H:%M')}</td>
+            <td style="padding: 12px;">
+                <button onclick="resolve('{exc.id}')" style="background:#2ecc71; color:white; border:none; padding:6px 12px; border-radius:4px; cursor:pointer;">Resolve</button>
+            </td>
+        </tr>
+        """
+
+    html_content = f"""
+    <html>
+        <head>
+            <title>Lend | Exceptions Dashboard</title>
+            <style>
+                body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: #f8f9fa; color: #333; }}
+                .container {{ max-width: 1100px; margin: 40px auto; background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1); }}
+                h1 {{ color: #2c3e50; border-bottom: 2px solid #e74c3c; padding-bottom: 10px; }}
+                table {{ width: 100%; border-collapse: collapse; margin-top: 20px; }}
+                th {{ text-align: left; background: #f1f3f5; padding: 12px; font-weight: 600; }}
+                .nav {{ margin-bottom: 20px; }}
+                .nav a {{ margin-right: 15px; color: #3498db; text-decoration: none; font-weight: bold; }}
+            </style>
+            <script>
+                async function resolve(id) {{
+                     const notes = prompt("Resolution Notes?");
+                     if (!notes) return;
+                     const res = await fetch(`/admin/exceptions/${{id}}/resolve?notes=${{encodeURIComponent(notes)}}`, {{ method: 'POST' }});
+                     if (res.ok) {{ alert('Exception resolved.'); location.reload(); }}
+                     else alert('Error resolving exception');
+                }}
+            </script>
+        </head>
+        <body>
+            <div class="container">
+                <div class="nav">
+                    <a href="/admin/funding-queue">Funding Queue</a>
+                    <a href="/admin/exceptions" style="color: #333;">Exceptions</a>
+                </div>
+                <h1>Reconciliation Exceptions</h1>
+                <p>Verify and manually correct ledger mismatches detected by the automated system.</p>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Severity</th>
+                            <th>Customer</th>
+                            <th>Type</th>
+                            <th>Description</th>
+                            <th>Detected At</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {rows or '<tr><td colspan="6" style="text-align:center; padding:20px; color:#999;">No unresolved exceptions</td></tr>'}
+                    </tbody>
+                </table>
+                <div style="margin-top: 30px; text-align: right;">
+                    <button onclick="runRecon()" style="background:#3498db; color:white; border:none; padding:10px 20px; border-radius:4px; cursor:pointer;">Run Reconciliation Now</button>
+                </div>
+                <script>
+                async function runRecon() {{
+                    const res = await fetch('/admin/reconciliation/run', {{ method: 'POST' }});
+                    if (res.ok) {{ 
+                        const data = await res.json();
+                        alert(`Reconciliation complete. Found ${{data.exceptions_found}} exceptions.`); 
+                        location.reload(); 
+                    }}
+                    else alert('Error running reconciliation');
+                }}
+                </script>
+            </div>
+        </body>
+    </html>
+    """
+    return HTMLResponse(content=html_content)
+
+@app.post("/admin/exceptions/{exc_id}/resolve")
+async def resolve_exception(
+    exc_id: UUID, 
+    notes: str,
+    session: AsyncSession = Depends(get_session)
+):
+    stmt = select(ReconciliationException).where(ReconciliationException.id == exc_id)
+    result = await session.execute(stmt)
+    exc = result.scalars().first()
+    if not exc:
+        raise HTTPException(status_code=404, detail="Exception not found")
+    
+    exc.resolution_status = "resolved"
+    exc.resolved_at = datetime.utcnow()
+    exc.resolved_by = "admin_ops"
+    exc.notes = notes
+    await session.commit()
+    return {"status": "resolved"}
+
+@app.post("/admin/reconciliation/run")
+async def trigger_reconciliation(
+    session: AsyncSession = Depends(get_session)
+):
+    """Manual trigger for the full reconciliation service."""
+    from src.services.reconciliation_service import ReconciliationService
+    service = ReconciliationService(session)
+    count = await service.run_full_reconciliation()
+    return {"status": "success", "exceptions_found": count}
 
 if __name__ == "__main__":
     uvicorn.run("src.main:app", host="0.0.0.0", port=8000, reload=True)
