@@ -8,4 +8,6 @@ We are building an embedded financial service that connects to a business’s re
 - **On-Demand Withdrawal**: Allows the business—or an autonomous agent acting on its behalf—to withdraw money at any moment against revenue already earned but not yet received.
 - **Immediate Delivery**: Funds are delivered immediately.
 - **Automatic Repayment**: Repayment happens automatically as revenue comes in.
-- **Programmable Liquidity**: No applications, delays, or manual approval.
+- **Programmable Liquidity**: No applications, delays, or manual approval for funding once verified.
+- **Free Compliance Layer**: Manual KYC/KYB document intake and internal approval workflow to bypass expensive vendor fees.
+- **Compliance-Locked Risk Engine**: Real-time enforcement that prevents capital deployment to unverified or flagged accounts.

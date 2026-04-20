@@ -133,7 +133,9 @@ class CashFlowIntelligence:
             "revenue_stability_score": stability_score,
             "concentration_risk_score": concentration_risk_score,
             "total_open_receivables": open_receivables,
-            "active_advances_total": active_advances
+            "active_advances_total": active_advances,
+            "verification_status": customer.verification_status,
+            "is_sanction_cleared": customer.is_sanction_cleared
         }
         
         evaluation = self.risk_engine.evaluate_customer(metrics, operating_history_days)

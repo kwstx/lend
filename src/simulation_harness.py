@@ -76,12 +76,26 @@ async def run_simulation():
         await session.commit()
         logger.info("Simulated historical transactions.")
 
-        # 4. Compute Initial Snapshot
+        # 4. Compute Initial Snapshot (Should be REJECTED due to unverified status)
         intel = CashFlowIntelligence(session)
-        await intel.compute_and_save_snapshot(customer_id)
-        logger.info("Computed initial cash flow snapshot.")
+        snapshot = await intel.compute_and_save_snapshot(customer_id)
+        logger.info(f"Initial snapshot computed. Eligibility: {snapshot.is_eligible}")
+        if snapshot.rejection_reasons:
+            logger.info(f"Rejection Reasons: {snapshot.rejection_reasons}")
 
-        # 5. Request Financing
+        # 5. Perform Manual Verification (Simulating Operations Approval)
+        logger.info("--- Performing Manual Compliance Verification ---")
+        customer.verification_status = "verified"
+        customer.is_sanction_cleared = True
+        customer.last_compliance_check_at = datetime.utcnow()
+        session.add(customer)
+        await session.commit()
+        
+        # 6. Re-compute Snapshot (Should be ELIGIBLE now)
+        snapshot = await intel.compute_and_save_snapshot(customer_id)
+        logger.info(f"Post-verification snapshot computed. Eligibility: {snapshot.is_eligible}")
+
+        # 7. Request Financing
         advance_service = AdvanceService(session)
         offer = await advance_service.create_financing_offer(customer_id, 2000.0)
         logger.info(f"Generated Financing Offer: ${offer.amount} (ID: {offer.id})")

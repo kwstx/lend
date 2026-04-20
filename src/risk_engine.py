@@ -79,7 +79,17 @@ class RiskEngine:
                 metadata={"governor_reason": self._governor.reason}
             )
 
-        # 1. Operating History
+        # 1. Compliance Status (Manual/Free Approach)
+        compliance_status = metrics.get('verification_status', 'unverified')
+        is_sanction_cleared = metrics.get('is_sanction_cleared', False)
+        
+        if compliance_status != 'verified':
+            rejection_reasons.append(f"Compliance status is {compliance_status}. Account must be manually verified by operations.")
+        
+        if not is_sanction_cleared:
+            rejection_reasons.append("Account has not cleared sanction/AML screening.")
+
+        # 2. Operating History
         if operating_history_days < rules.min_operating_history_days:
             rejection_reasons.append(f"Insufficient operating history: {operating_history_days} days (min {rules.min_operating_history_days})")
 

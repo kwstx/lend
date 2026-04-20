@@ -14,11 +14,33 @@ class Customer(SQLModel, table=True):
     stripe_account_id: Optional[str] = Field(default=None, index=True)
     plaid_item_id: Optional[str] = Field(default=None, index=True)
     created_at: datetime = Field(default_factory=datetime.utcnow)
-    
+
+    # Compliance & Verification (Free/Manual Approach)
+    verification_status: str = Field(default="unverified") # unverified, pending, verified, rejected
+    is_sanction_cleared: bool = Field(default=False)
+    tax_id: Optional[str] = Field(default=None)
+    business_registration_number: Optional[str] = Field(default=None)
+    verification_metadata: Dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    last_compliance_check_at: Optional[datetime] = None
+
     # Relationships
     receivables: List["Receivable"] = Relationship(back_populates="customer")
     advances: List["Advance"] = Relationship(back_populates="customer")
     events: List["EventLog"] = Relationship(back_populates="customer")
+    beneficial_owners: List["BeneficialOwner"] = Relationship(back_populates="customer")
+
+class BeneficialOwner(BaseTenantModel, table=True):
+    """Manual tracking of business owners for KYC/AML."""
+    __tablename__ = "beneficial_owners"
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    full_name: str
+    email: str
+    verification_status: str = Field(default="unverified") 
+    is_sanction_cleared: bool = Field(default=False)
+    ownership_percentage: float
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+    customer: Customer = Relationship(back_populates="beneficial_owners")
 
 class Receivable(BaseTenantModel, table=True):
     __tablename__ = "receivables"
