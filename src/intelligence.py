@@ -165,7 +165,8 @@ class CashFlowIntelligence:
             "verification_status": customer.verification_status,
             "is_sanction_cleared": customer.is_sanction_cleared,
             "repayment_consistency_score": repayment_consistency,
-            "fraud_results": fraud_results  # Pass the new signals
+            "fraud_results": fraud_results,
+            "sector": customer.sector
         }
         
         evaluation = self.risk_engine.evaluate_customer(metrics, operating_history_days)

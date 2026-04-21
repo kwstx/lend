@@ -22,7 +22,8 @@ class Customer(SQLModel, table=True):
     business_registration_number: Optional[str] = Field(default=None)
     verification_metadata: Dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
     last_compliance_check_at: Optional[datetime] = None
-    last_synced_at: Optional[datetime] = Field(default_factory=datetime.utcnow) # Added for stale-data killswitch
+    last_synced_at: Optional[datetime] = Field(default_factory=datetime.utcnow) 
+    sector: str = Field(default="general") # e.g. retail, saas, ecommerce, services
 
     # Relationships
     receivables: List["Receivable"] = Relationship(back_populates="customer")
@@ -258,4 +259,18 @@ class AdminUser(SQLModel, table=True):
     role: str = Field(default="viewer") # viewer, operations, admin, super_admin
     is_active: bool = Field(default=True)
     created_at: datetime = Field(default_factory=datetime.utcnow)
+
+class PolicyChangeProposal(SQLModel, table=True):
+    """Multi-Sig Governance for Risk Policy updates."""
+    __tablename__ = "policy_change_proposals"
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    target_policy: str # e.g. standard_v1.json
+    proposed_content: Dict[str, Any] = Field(sa_column=Column(JSON))
+    
+    proposer_id: UUID = Field(foreign_key="admin_users.id")
+    approver_id: Optional[UUID] = Field(default=None, foreign_key="admin_users.id")
+    
+    status: str = Field(default="pending") # pending, approved, rejected
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    finalized_at: Optional[datetime] = None
 

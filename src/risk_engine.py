@@ -19,6 +19,7 @@ class RiskPolicy(BaseModel):
 
 class RiskGovernor(BaseModel):
     global_multiplier: float
+    sector_multipliers: Dict[str, float] = {} # e.g. {"saas": 1.2, "retail": 0.8}
     status: str  # active, reduced, suspended
     last_updated: datetime
     reason: str
@@ -197,11 +198,20 @@ class RiskEngine:
         
         base_potential = (open_receivables * rules.revenue_multiplier)
         
-        # Risk-adjusted limit with stale-data penalty
-        risk_adjusted_limit = base_potential * (1.0 - pd) * lgd_factor * stale_multiplier
+        # Sector-specific multiplier
+        customer_sector = metrics.get('sector', 'general')
+        sector_multiplier = self._governor.sector_multipliers.get(customer_sector, 1.0)
+        
+        # Risk-adjusted limit with stale-data penalty and sector override
+        risk_adjusted_limit = base_potential * (1.0 - pd) * lgd_factor * stale_multiplier * sector_multiplier
         
         final_limit = (risk_adjusted_limit * self._governor.global_multiplier) - active_advances
         final_limit = min(max(0.0, final_limit), rules.max_exposure_cap)
+
+        metadata.update({
+            "sector_applied": customer_sector,
+            "sector_multiplier_applied": sector_multiplier
+        })
 
         return RiskEvaluationResult(
             is_eligible=True,
