@@ -131,15 +131,32 @@ class RiskEngine:
         score = self._calculate_probabilistic_score(metrics, operating_history_days)
         pd = self._map_score_to_pd(score)
         
+        # Fraud Deterrence Factor
+        fraud_data = metrics.get('fraud_results', {})
+        fraud_risk = fraud_data.get('fraud_risk_level', 'low')
+        
+        if fraud_risk == 'high':
+            rejection_reasons.append("High Fraud Risk detected (multiple anomalies)")
+        
         # Bayesian Nudge (Simulated: adjust PD based on historical repayment consistency)
-        # If repayment_consistency is high, nudge PD down.
         repayment_consistency = metrics.get('repayment_consistency_score', 1.0)
-        pd = pd * (2.0 - repayment_consistency) # 1.0 means no change, 0.5 means double risk, 1.5 means reduced risk
+        pd = pd * (2.0 - repayment_consistency)
+        
+        # Apply Fraud Multiplier if medium risk
+        if fraud_risk == 'medium':
+            pd = pd * 1.5 # 50% increase in risk for suspicious activity
+            
         pd = min(1.0, max(0.01, pd))
 
-        # Check Eligibility based on score threshold (e.g. 300)
+        # Check Eligibility based on score threshold
         if score < 300:
             rejection_reasons.append(f"Risk score too low: {score}")
+            
+        # Add specific fraud flags for transparency if any exist
+        if fraud_data.get('is_structuring_detected'):
+            rejection_reasons.append("Structuring/Smurfing pattern detected")
+        if fraud_data.get('is_circular_flow_detected'):
+            rejection_reasons.append("Circular fund flow (money laundering risk) detected")
 
         if rejection_reasons:
             return RiskEvaluationResult(

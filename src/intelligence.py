@@ -150,6 +150,11 @@ class CashFlowIntelligence:
         
         repayment_consistency = (completed_repayments / total_repayments) if total_repayments > 0 else 1.0
 
+        # NEW: 5. Fraud Detection Signals
+        from src.fraud_detection import FraudDetector
+        fraud_detector = FraudDetector(self.session)
+        fraud_results = await fraud_detector.run_all(customer_id)
+
         # 6. Risk Evaluation
         operating_history_days = (now - customer.created_at).days
         metrics = {
@@ -159,7 +164,8 @@ class CashFlowIntelligence:
             "active_advances_total": active_advances,
             "verification_status": customer.verification_status,
             "is_sanction_cleared": customer.is_sanction_cleared,
-            "repayment_consistency_score": repayment_consistency
+            "repayment_consistency_score": repayment_consistency,
+            "fraud_results": fraud_results  # Pass the new signals
         }
         
         evaluation = self.risk_engine.evaluate_customer(metrics, operating_history_days)
