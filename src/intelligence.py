@@ -1,10 +1,11 @@
+import numpy as np
 from datetime import datetime, timedelta
 from typing import Optional
 from uuid import UUID
 from sqlalchemy import text, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
-from src.models.models import CashFlowSnapshot, Transaction, Receivable, Advance, Customer
+from src.models.models import CashFlowSnapshot, Transaction, Receivable, Advance, Customer, RepaymentObligation
 from src.risk_engine import RiskEngine
 from src.core.observability import AuditLogger
 
@@ -25,7 +26,6 @@ class CashFlowIntelligence:
             raise ValueError(f"Customer {customer_id} not found")
 
         # 1. Trailing Revenue (30d and 90d)
-        # We use raw SQL for performance and to ensure it's a single deterministic operation
         revenue_query = text("""
             SELECT 
                 COALESCE(SUM(CASE WHEN timestamp >= :d30 THEN amount ELSE 0 END), 0) as rev_30d,
@@ -45,8 +45,8 @@ class CashFlowIntelligence:
         rev_30d = rev_row.rev_30d if rev_row else 0.0
         rev_90d = rev_row.rev_90d if rev_row else 0.0
 
-        # 2. Revenue Stability (Coefficient of Variation of monthly revenue over last 6 months)
-        # We'll calculate monthly sums and then compute CV
+        # 2. Revenue Stability (Weighted Volatility via EWMA)
+        # We'll calculate monthly sums and then compute weighted CV using NumPy
         stability_query = text("""
             WITH monthly_rev AS (
                 SELECT 
@@ -58,18 +58,28 @@ class CashFlowIntelligence:
                   AND category IN ('sales', 'subscription')
                   AND timestamp >= :d180
                 GROUP BY 1
+                ORDER BY month DESC
             )
-            SELECT 
-                AVG(total) as avg_rev,
-                STDDEV(total) as std_rev
-            FROM monthly_rev
+            SELECT total FROM monthly_rev
         """)
         d180 = now - timedelta(days=180)
         res = await self.session.execute(stability_query, {"cid": customer_id, "d180": d180})
-        stab_row = res.fetchone()
-        avg_rev = stab_row.avg_rev if stab_row and stab_row.avg_rev else 0.0
-        std_rev = stab_row.std_rev if stab_row and stab_row.std_rev else 0.0
-        stability_score = (std_rev / avg_rev) if avg_rev > 0 else 0.0
+        rows = res.fetchall()
+        revenue_series = [float(row.total) for row in rows] if rows else []
+
+        if len(revenue_series) > 1:
+            # Alpha for EWMA (higher alpha = more weight to recent data)
+            alpha = 0.4
+            weights = np.array([(1 - alpha)**i for i in range(len(revenue_series))])
+            
+            # Weighted Mean and Standard Deviation
+            weighted_mean = np.average(revenue_series, weights=weights)
+            weighted_var = np.average((np.array(revenue_series) - weighted_mean)**2, weights=weights)
+            weighted_std = np.sqrt(weighted_var)
+            
+            stability_score = (weighted_std / weighted_mean) if weighted_mean > 0 else 1.0
+        else:
+            stability_score = 0.5 # Default middle ground for new customers
 
         # 3. Concentration Risk (Top payer % of revenue over last 90d)
         concentration_query = text("""
@@ -94,9 +104,9 @@ class CashFlowIntelligence:
         """)
         res = await self.session.execute(concentration_query, {"cid": customer_id, "d90": d90})
         conc_row = res.fetchone()
-        concentration_risk_score = conc_row.concentration if conc_row else 0.0
+        concentration_risk_score = float(conc_row.concentration) if conc_row else 0.0
 
-        # 4. Inflow Classification (True Revenue vs Transfers/Refunds)
+        # ... (Inflow Classification and Core Liquidity omitted for brevity in instruction, keeping same logic)
         classification_query = text("""
             SELECT 
                 COALESCE(SUM(CASE WHEN category IN ('sales', 'subscription') THEN amount ELSE 0 END), 0) as true_revenue,
@@ -111,7 +121,6 @@ class CashFlowIntelligence:
         true_rev_30d = class_row.true_revenue if class_row else 0.0
         other_inflow_30d = class_row.other_inflow if class_row else 0.0
 
-        # 5. Core Liquidity (Open Receivables & Active Advances)
         receivables_query = select(func.sum(Receivable.amount)).where(
             Receivable.customer_id == customer_id,
             Receivable.status == "pending"
@@ -123,10 +132,24 @@ class CashFlowIntelligence:
         
         recv_res = await self.session.execute(receivables_query)
         adv_res = await self.session.execute(advances_query)
-        
         open_receivables = recv_res.scalar() or 0.0
         active_advances = adv_res.scalar() or 0.0
         
+        # 4. Bayesian Nudge: Repayment Consistency
+        repayment_query = text("""
+            SELECT 
+                COUNT(*) as total,
+                SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed
+            FROM repayment_obligations
+            WHERE customer_id = :cid
+        """)
+        res = await self.session.execute(repayment_query, {"cid": customer_id})
+        rep_row = res.fetchone()
+        total_repayments = rep_row.total if rep_row else 0
+        completed_repayments = rep_row.completed if rep_row else 0
+        
+        repayment_consistency = (completed_repayments / total_repayments) if total_repayments > 0 else 1.0
+
         # 6. Risk Evaluation
         operating_history_days = (now - customer.created_at).days
         metrics = {
@@ -135,7 +158,8 @@ class CashFlowIntelligence:
             "total_open_receivables": open_receivables,
             "active_advances_total": active_advances,
             "verification_status": customer.verification_status,
-            "is_sanction_cleared": customer.is_sanction_cleared
+            "is_sanction_cleared": customer.is_sanction_cleared,
+            "repayment_consistency_score": repayment_consistency
         }
         
         evaluation = self.risk_engine.evaluate_customer(metrics, operating_history_days)
