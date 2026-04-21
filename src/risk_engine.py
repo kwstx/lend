@@ -98,14 +98,25 @@ class RiskEngine:
     def evaluate_customer(
         self, 
         metrics: Dict[str, Any], 
-        operating_history_days: int
+        operating_history_days: int,
+        last_synced_at: Optional[datetime] = None,
+        is_shadow_mode: bool = False
     ) -> RiskEvaluationResult:
         if not self._current_policy or not self._governor:
             raise ValueError("Risk engine not properly initialized")
 
         rules = self._current_policy.rules
         rejection_reasons = []
+        metadata = {"is_shadow_mode": is_shadow_mode}
         
+        # 0. Stale-Data Killswitch
+        stale_multiplier = 1.0
+        if last_synced_at:
+            hours_since_sync = (datetime.utcnow() - last_synced_at).total_seconds() / 3600
+            if hours_since_sync > 24:
+                stale_multiplier = 0.5
+                metadata["stale_data_penalty_applied"] = True
+
         # Global Health Check
         if self._governor.status == "suspended":
             return RiskEvaluationResult(
@@ -114,7 +125,8 @@ class RiskEngine:
                 probability_of_default=1.0,
                 credit_limit=0.0,
                 policy_version=self._current_policy.version,
-                rejection_reasons=["Global suspension of lending"]
+                rejection_reasons=["Global suspension of lending"],
+                metadata=metadata
             )
 
         # Hard Gate: Compliance & Sanctions
@@ -144,7 +156,7 @@ class RiskEngine:
         
         # Apply Fraud Multiplier if medium risk
         if fraud_risk == 'medium':
-            pd = pd * 1.5 # 50% increase in risk for suspicious activity
+            pd = pd * 1.5 
             
         pd = min(1.0, max(0.01, pd))
 
@@ -152,11 +164,20 @@ class RiskEngine:
         if score < 300:
             rejection_reasons.append(f"Risk score too low: {score}")
             
-        # Add specific fraud flags for transparency if any exist
+        # Add specific fraud flags for transparency
         if fraud_data.get('is_structuring_detected'):
             rejection_reasons.append("Structuring/Smurfing pattern detected")
         if fraud_data.get('is_circular_flow_detected'):
             rejection_reasons.append("Circular fund flow (money laundering risk) detected")
+
+        # Explainability (SHAP-inspired)
+        explanation = self.explain_rejection(metrics, operating_history_days, score)
+        metadata.update({
+            "risk_score": score,
+            "applied_pd": round(pd, 4),
+            "rejection_explanation": explanation,
+            "stale_multiplier": stale_multiplier
+        })
 
         if rejection_reasons:
             return RiskEvaluationResult(
@@ -166,26 +187,18 @@ class RiskEngine:
                 credit_limit=0.0,
                 policy_version=self._current_policy.version,
                 rejection_reasons=rejection_reasons,
-                metadata={
-                    "risk_score": score,
-                    "applied_pd": round(pd, 4),
-                    "repayment_consistency": round(repayment_consistency, 2)
-                }
+                metadata=metadata
             )
 
         # Credit Limit via Expected Loss (EL) Formula
-        # EL = PD * LGD * EAD
-        # Here we use the formula to find EAD (Limit) such that EL is acceptable.
-        # Or more simply: Limit = Base_Limit * (1 - PD) * LGD_Multiplier
-        lgd_factor = 0.8 # Assume 20% recovery in default
-        
+        lgd_factor = 0.8 
         open_receivables = metrics.get('total_open_receivables', 0.0)
         active_advances = metrics.get('active_advances_total', 0.0)
         
         base_potential = (open_receivables * rules.revenue_multiplier)
         
-        # Risk-adjusted limit: Limit = Potential * (1 - PD) * Recovery_Rate
-        risk_adjusted_limit = base_potential * (1.0 - pd) * lgd_factor
+        # Risk-adjusted limit with stale-data penalty
+        risk_adjusted_limit = base_potential * (1.0 - pd) * lgd_factor * stale_multiplier
         
         final_limit = (risk_adjusted_limit * self._governor.global_multiplier) - active_advances
         final_limit = min(max(0.0, final_limit), rules.max_exposure_cap)
@@ -196,10 +209,22 @@ class RiskEngine:
             probability_of_default=pd,
             credit_limit=final_limit,
             policy_version=self._current_policy.version,
-            metadata={
-                "risk_score": score,
-                "score_components": {"history": "weighted", "volatility": "weighted"},
-                "applied_pd": round(pd, 4),
-                "recovery_factor": lgd_factor
-            }
+            metadata=metadata
         )
+
+    def explain_rejection(self, metrics: Dict[str, Any], history_days: int, score: int) -> str:
+        """
+        Generates a human-readable explanation of risk factors.
+        """
+        reasons = []
+        if history_days < 90:
+            reasons.append("Short operating history (contributes 30% to risk)")
+        if metrics.get('revenue_stability_score', 1.0) > 0.5:
+            reasons.append("High revenue volatility (contributes 40% to risk)")
+        if metrics.get('concentration_risk_score', 1.0) > 0.6:
+            reasons.append("Payer concentration too high (contributes 30% to risk)")
+        
+        if not reasons:
+            return "Risk score is within acceptable parameters."
+        
+        return " | ".join(reasons)

@@ -44,29 +44,62 @@ class AdvanceService:
         # Calculate operating history
         operating_days = (snapshot.calculated_at - customer.created_at).days
 
-        # 2. Evaluate Risk
+        # 2. Evaluate Risk (with Stale-Data Check)
         metrics = {
             "revenue_stability_score": snapshot.revenue_stability_score,
             "concentration_risk_score": snapshot.concentration_risk_score,
             "total_open_receivables": snapshot.total_open_receivables,
-            "active_advances_total": snapshot.active_advances_total
+            "active_advances_total": snapshot.active_advances_total,
+            "verification_status": customer.verification_status,
+            "is_sanction_cleared": customer.is_sanction_cleared,
+            "fraud_results": snapshot.risk_evaluation_metadata.get('fraud_results', {}) if snapshot.risk_evaluation_metadata else {}
         }
         
-        evaluation = self.risk_engine.evaluate_customer(metrics, operating_days)
+        evaluation = self.risk_engine.evaluate_customer(
+            metrics, 
+            operating_days, 
+            last_synced_at=customer.last_synced_at
+        )
         
+        # 2b. Shadow Mode (Run a parallel evaluation for logging/testing new rules)
+        # In a real system, this might be a different engine version
+        shadow_eval = self.risk_engine.evaluate_customer(
+            metrics, 
+            operating_days, 
+            last_synced_at=customer.last_synced_at,
+            is_shadow_mode=True
+        )
+        
+        # Log Shadow Comparison
+        await AuditLogger.log_action(
+            self.session,
+            customer_id=customer_id,
+            event_type="risk_shadow_evaluation",
+            payload={
+                "production_eligible": evaluation.is_eligible,
+                "shadow_eligible": shadow_eval.is_eligible,
+                "production_limit": evaluation.credit_limit,
+                "shadow_limit": shadow_eval.credit_limit,
+                "production_score": evaluation.risk_score,
+                "shadow_score": shadow_eval.risk_score
+            }
+        )
+
         if not evaluation.is_eligible:
             raise HTTPException(
                 status_code=400, 
                 detail={
                     "message": "Advance request denied by risk engine",
-                    "reasons": evaluation.rejection_reasons
+                    "reasons": evaluation.rejection_reasons,
+                    "explanation": evaluation.metadata.get('rejection_explanation')
                 }
             )
         
         if amount > evaluation.credit_limit:
             raise HTTPException(
                 status_code=400,
-                detail=f"Requested amount {amount} exceeds current credit limit of {evaluation.credit_limit}"
+                detail=f"Requested amount {amount} exceeds current credit limit of {evaluation.credit_limit}. "
+                       f"Reason: {evaluation.metadata.get('rejection_explanation')}"
             )
 
         # 3. Capital Source Selection & Reservation

@@ -22,6 +22,7 @@ class Customer(SQLModel, table=True):
     business_registration_number: Optional[str] = Field(default=None)
     verification_metadata: Dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
     last_compliance_check_at: Optional[datetime] = None
+    last_synced_at: Optional[datetime] = Field(default_factory=datetime.utcnow) # Added for stale-data killswitch
 
     # Relationships
     receivables: List["Receivable"] = Relationship(back_populates="customer")
